@@ -1,8 +1,15 @@
 <script setup lang="ts">
-import { ref, unref, watch } from 'vue';
+import { ref, watch } from 'vue';
+import axios from 'axios'
 const SIZE = 10 * 1024 * 1024;	// 10M
 
-const fileList = ref<any>([])
+const resetData = {
+	md5: null,
+	md5percentage: 0,
+	isMD5Loading: false,
+	percentage: 0,
+}
+
 const worker = ref<Worker>()
 const uploadList = ref<any>([])
 const onQueue = ref<boolean>(false)
@@ -12,17 +19,19 @@ const md5 = ref<string | boolean>()
 const uploadingFileName = ref<string | null>(null)
 
 function fileChange(file: File) {
-	console.log("file change: ", file);
-	fileList.value.push(file);
-	uploadList.value.push(file);
+	uploadList.value.push({
+		file: file,
+		...resetData,
+		filename: file.name
+	});
 }
 function beforeUpload(file: any) {
 	return false;
 }
 
 function queueUpload(file: any) {
-	onQueue.value = true;
-	upload(file)
+	// onQueue.value = true;
+	// uploadFile(file)
 }
 // MD5 hash of the file
 function computeMD5(fileChunkList: any[]): Promise<any> {
@@ -53,9 +62,7 @@ function computeMD5(fileChunkList: any[]): Promise<any> {
 			if (e.data.md5 && e.data.percentage === 100) {
 				md5percentage.value = 0;
 				isMD5Loading.value = false;
-				resolve({
-					md5: e.data.md5
-				});
+				resolve(e.data.md5);
 			}
 		};
 	})
@@ -72,89 +79,141 @@ function createFileChunk(file: any, size = SIZE) {
 	return fileChunkList;
 }
 
-async function preVerifyUpload(params: any) {
-
+async function preVerifyUpload(params: { filename: string, md5: string, totalChunks: number, size: number }) {
+	const { data } = await axios.post('/api/preVerify', params)
+	return data
 }
 
-async function upload(file: any) {
+const uploadFile = async (index: number) => {
 	// 上传
-	uploadingFileName.value = file.name;
-	const fileChunkList = createFileChunk(file);
-	md5.value = await computeMD5(fileChunkList)
+	const file = uploadList.value[index]
+	const fileChunkList = createFileChunk(file.file);
+	file.md5 = await computeMD5(fileChunkList)
+	file.fileChunkList = fileChunkList
 
 	// MD5计算完成 发送预检请求，判断是否上传过
+	const { shouldUpload, uploadedList, msg } = await preVerifyUpload({
+		filename: file.filename,
+		md5: file.md5,
+		totalChunks: fileChunkList.length,
+		size: SIZE,
+	});
 
+	if (msg) {
+		return alert(msg);
+	}
+
+	if (!shouldUpload) {
+		alert("upload success!")
+		return;
+	}
+
+	await uploadChunks(uploadedList, fileChunkList.map(item => ({
+		chunk: item.file,
+		md5: file.md5,
+		filename: file.filename,
+		size: SIZE
+	})), file)
 }
+
+async function uploadChunks(uploadedList: any[], fileChunkList: any[], file: any) {
+	const totalChunks = fileChunkList.length
+	const requestList = fileChunkList
+		.filter((item, index) => !uploadedList.includes(index))
+		.map(({ chunk, size, md5, filename }, index) => {
+			const formData = new FormData();
+			formData.append("file", chunk);
+			formData.append("chunkIndex", String(index));
+			formData.append("totalChunks", String(totalChunks));
+			formData.append("chunkSize", String(size));
+			formData.append("filename", filename);
+			formData.append("md5", md5);
+
+			return { formData, index };
+		}).map(({ formData }) => axios.post('/api/upload', formData, {
+			headers: {
+				'Content-Type': 'multipart/form-data'
+			}
+		}))
+
+	// TODO 并发控制，失败重试
+	await Promise.all(requestList);
+
+	if (uploadedList.length + requestList.length === totalChunks) {
+		await uploadMerge({
+			md5: file.md5,
+			filename: file.filename, 
+			size: SIZE
+		});
+	}
+	// Promise.all(requestList).then(res => {
+	// 	console.log(res);
+	// })
+	// console.log(requestList);
+}
+
+async function uploadMerge(pamas: any) {
+	const { data } = await axios.post('/api/uploadMerge', pamas)
+	alert(data.msg)
+}
+
+// async function asyncPool(poolLimit: any, array: any, iteratorFn: any) {
+//     const ret = []; // 存储所有的异步任务
+//     const executing: any[] = []; // 存储正在执行的异步任务
+//     for (const item of array) {
+//         // 调用iteratorFn函数创建异步任务
+//         const p = Promise.resolve().then(() => iteratorFn(item, array));
+//         ret.push(p); // 保存新的异步任务
+
+//         // 当poolLimit值小于或等于总任务个数时，进行并发控制
+//         if (poolLimit <= array.length) {
+//             // 当任务完成后，从正在执行的任务数组中移除已完成的任务
+//             const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+//             executing.push(e); // 保存正在执行的异步任务
+//             if (executing.length >= poolLimit) {
+//             	await Promise.race(executing); // 等待较快的任务执行完成
+//             }
+//         }
+//     }
+//     return Promise.all(ret);
+// }
 
 watch(uploadList.value, (files: any[]) => {
 	// 上传文件
-	if (onQueue.value === true || files.length === 0) return;
-	queueUpload([...files][0]);
+	// if (onQueue.value === true || files.length === 0) return;
+	// queueUpload([...files][0]);
 })
 </script>
 
 <template>
 	<div>
-		<el-upload ref="upload" :on-change="fileChange" :before-upload="beforeUpload" drag :limit="1"
-			action="https://jsonplaceholder.typicode.com/posts/">
-			<i class="el-icon-upload" />
-			<div class="el-upload__text">
-				将文件拖到此处，或<em>点击上传</em>
-			</div>
-			<div slot="tip" class="el-upload__tip">
-				<!-- <div v-if="percentage > 0 && percentage < 100" class="upload-per">
-					<div class="tit">
-						{{ uploadingFileName }} - 上传中
-						<span class="dotting" />
-					</div>
-					<el-progress :percentage="percentage" :stroke-width="3" style="margin-top: 5px;" />
-				</div> -->
-
-				<div v-if="isMD5Loading" class="md5-per">
-					<div class="tit">
-						{{ uploadingFileName }} - md5计算中
-						<span class="dotting" />
-					</div>
-					<el-progress :percentage="md5percentage" :stroke-width="3" style="margin-top: 5px;" />
-				</div>
-			</div>
-
-			<!-- <div
-			slot="tip"
-			class="el-upload__tip"
-		>
-			<div
-				v-if="percentage > 0 && percentage < 100"
-				class="upload-per"
-			>
-				<div class="tit">
-					{{ uploadingFileName }} - 上传中
-					<span class="dotting"/>
-				</div>
-				<el-progress
-					:percentage="percentage"
-					:stroke-width="3"
-					style="margin-top: 5px;"
-				/>
-			</div>
-			<div
-				v-if="isMD5Loading"
-				class="md5-per"
-			>
-				<div class="tit">
-					{{ uploadingFileName }} - md5计算中
-					<span class="dotting"/>
-				</div>
-				<el-progress
-					:percentage="md5percentage"
-					:stroke-width="3"
-					style="margin-top: 5px;"
-				/>
-			</div>
-		</div> -->
+		<el-upload ref="upload" class="upload-demo" :on-change="fileChange" :before-upload="beforeUpload"
+			action="https://run.mocky.io/v3/9d059bf9-4660-45f2-925d-ce80ad6c4d15" :auto-upload="false">
+			<template #trigger>
+				<el-button type="primary">select file</el-button>
+			</template>
 		</el-upload>
+		<div class="file-list">
+			<div v-for="({ file }, index) in uploadList" class="upload-file">
+				<span>{{ file.name }}</span>
+				<div>
+					<el-button type="primary" @click="uploadFile(index)">upload</el-button>
+					<el-button type="warning">pause</el-button>
+					<el-button type="danger">delete</el-button>
+				</div>
+			</div>
+		</div>
 	</div>
 </template>
 
 <style scoped>
+.upload-file {
+	margin-top: 20px;
+	display: flex;
+	justify-content: space-between;
+}
+
+.upload-demo>>>.el-upload-list {
+	display: none;
+}
 </style>
