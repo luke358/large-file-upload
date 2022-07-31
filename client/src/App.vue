@@ -34,14 +34,15 @@ function queueUpload(file: any) {
 	// uploadFile(file)
 }
 // MD5 hash of the file
-function computeMD5(fileChunkList: any[]): Promise<any> {
+function computeMD5(fileInfo: any): Promise<any> {
 	isMD5Loading.value = true;
 	return new Promise((resolve, reject) => {
 		const wk = new Worker('/md5.js');
 		worker.value = wk;
 
 		worker.value.postMessage({
-			fileChunkList
+			file: fileInfo.file.raw,
+			size: SIZE,
 		});
 		worker.value.onmessage = e => {
 			// 计算错误
@@ -55,11 +56,11 @@ function computeMD5(fileChunkList: any[]): Promise<any> {
 			// 计算进度
 			if (e.data.percentage > 0) {
 				console.log('md5进度:' + e.data.percentage);
-				md5percentage.value = Number(e.data.percentage.toFixed(1));
+				md5percentage.value = e.data.percentage;
 			}
 
 			// 计算完成
-			if (e.data.md5 && e.data.percentage === 100) {
+			if (e.data.isOk && e.data.percentage === 100) {
 				md5percentage.value = 0;
 				isMD5Loading.value = false;
 				resolve(e.data.md5);
@@ -86,70 +87,60 @@ async function preVerifyUpload(params: { filename: string, md5: string, totalChu
 
 const uploadFile = async (index: number) => {
 	// 上传
-	const file = uploadList.value[index]
-	const fileChunkList = createFileChunk(file.file);
-	file.md5 = await computeMD5(fileChunkList)
-	file.fileChunkList = fileChunkList
+	const fileInfo = uploadList.value[index]
+	// const fileChunkList = createFileChunk(fileInfo.file);
+	const totalChunks = Math.ceil(fileInfo.file.raw.size / SIZE)
+
+	fileInfo.md5 = await computeMD5(fileInfo)
 
 	// MD5计算完成 发送预检请求，判断是否上传过
-	const { shouldUpload, uploadedList, msg } = await preVerifyUpload({
-		filename: file.filename,
-		md5: file.md5,
-		totalChunks: fileChunkList.length,
+	const { shouldUpload, uploadedList, isOk } = await preVerifyUpload({
+		filename: fileInfo.filename,
+		md5: fileInfo.md5,
+		totalChunks: Math.ceil(fileInfo.file.raw.size / SIZE),
 		size: SIZE,
 	});
 
-	if (msg) {
-		return alert(msg);
-	}
-
-	if (!shouldUpload) {
+	if (!shouldUpload || isOk) {
 		alert("upload success!")
 		return;
 	}
 
-	await uploadChunks(uploadedList, fileChunkList.map(item => ({
-		chunk: item.file,
-		md5: file.md5,
-		filename: file.filename,
-		size: SIZE
-	})), file)
+	const noUploadedList = [...Array(totalChunks).keys()]
+		.filter((_, index) => !uploadedList.includes(index))
+
+	
+	await uploadChunks(noUploadedList, fileInfo, totalChunks)
 }
 
-async function uploadChunks(uploadedList: any[], fileChunkList: any[], file: any) {
-	const totalChunks = fileChunkList.length
-	const requestList = fileChunkList
-		.filter((item, index) => !uploadedList.includes(index))
-		.map(({ chunk, size, md5, filename }, index) => {
-			const formData = new FormData();
-			formData.append("file", chunk);
-			formData.append("chunkIndex", String(index));
-			formData.append("totalChunks", String(totalChunks));
-			formData.append("chunkSize", String(size));
-			formData.append("filename", filename);
-			formData.append("md5", md5);
+async function uploadChunks(noUploadedList: number[], fileInfo: any, totalChunks: number) {
 
-			return { formData, index };
-		}).map(({ formData }) => axios.post('/api/upload', formData, {
-			headers: {
-				'Content-Type': 'multipart/form-data'
-			}
-		}))
+	// TODO 失败重试
+	return asyncPool(5, noUploadedList, (index: number) => {
+		return uploadChunk(fileInfo, index, totalChunks)
+	})
+}
 
-	// TODO 并发控制，失败重试
-	await Promise.all(requestList);
+async function uploadChunk(fileInfo: any, chunkIndex: number, totalChunks: number) {
+	
+	const formData = new FormData();
+	
+	const fileSize = fileInfo.file.raw.size
+	let start = chunkIndex * SIZE;
+	let end = start + SIZE >= fileSize ? fileSize : start + SIZE;
+	// 只有轮到该切片上传的时候才进行切片
+	formData.append("file", fileInfo.file.raw.slice(start, end));
 
-	if (uploadedList.length + requestList.length === totalChunks) {
-		await uploadMerge({
-			md5: file.md5,
-			filename: file.filename, 
-			size: SIZE
-		});
-	}
-	// Promise.all(requestList).then(res => {
-	// 	console.log(res);
-	// })
-	// console.log(requestList);
+	formData.append("chunkIndex", String(chunkIndex));
+	formData.append("totalChunks", String(totalChunks));
+	formData.append("chunkSize", String(SIZE));
+	formData.append("filename", fileInfo.filename);
+	formData.append("md5", fileInfo.md5);
+	return axios.post('/api/upload', formData, {
+		headers: {
+			'Content-Type': 'multipart/form-data'
+		}
+	})
 }
 
 async function uploadMerge(pamas: any) {
@@ -157,26 +148,27 @@ async function uploadMerge(pamas: any) {
 	alert(data.msg)
 }
 
-// async function asyncPool(poolLimit: any, array: any, iteratorFn: any) {
-//     const ret = []; // 存储所有的异步任务
-//     const executing: any[] = []; // 存储正在执行的异步任务
-//     for (const item of array) {
-//         // 调用iteratorFn函数创建异步任务
-//         const p = Promise.resolve().then(() => iteratorFn(item, array));
-//         ret.push(p); // 保存新的异步任务
-
-//         // 当poolLimit值小于或等于总任务个数时，进行并发控制
-//         if (poolLimit <= array.length) {
-//             // 当任务完成后，从正在执行的任务数组中移除已完成的任务
-//             const e = p.then(() => executing.splice(executing.indexOf(e), 1));
-//             executing.push(e); // 保存正在执行的异步任务
-//             if (executing.length >= poolLimit) {
-//             	await Promise.race(executing); // 等待较快的任务执行完成
-//             }
-//         }
-//     }
-//     return Promise.all(ret);
-// }
+async function asyncPool(limit: number, array: any[], iteratorFn: any) {
+	const ret = [];
+	const executing: any[] = [];
+	console.log(limit, array, iteratorFn);
+	
+	for (const item of array) {
+		const p = iteratorFn(item);
+		ret.push(p);
+		if (limit <= array.length) {
+			const e = p.then(() => {
+				console.log('正在运行' + executing.length)
+				executing.splice(executing.indexOf(e), 1)
+			});
+			executing.push(e);
+			if (executing.length >= limit) {
+				await Promise.race(executing);
+			}
+		}
+	}
+	return Promise.all(ret);
+}
 
 watch(uploadList.value, (files: any[]) => {
 	// 上传文件

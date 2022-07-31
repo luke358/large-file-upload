@@ -3,35 +3,56 @@ self.importScripts("/spark-md5.min.js");
 
 // 生成文件 hash
 self.onmessage = e => {
-  const { fileChunkList } = e.data;
+  const { file, size } = e.data;
+  const chunks = Math.ceil(file.size / size);
+  const fileSize = file.size
   const spark = new self.SparkMD5.ArrayBuffer();
-  let percentage = 0;
-  let count = 0;
+  const startTime = new Date().getTime();
+
+  let blobSlice =
+    File.prototype.slice ||
+    File.prototype.mozSlice ||
+    File.prototype.webkitSlice;
+
+  let currentChunk = 0;
+
   const reader = new FileReader();
+
+  loadNext();
+
   reader.onload = e => {
     spark.append(e.target.result);
-    if (count === fileChunkList.length) {
+    if (currentChunk < chunks) {
+      currentChunk++;
+      let percentage = ((currentChunk / chunks) * 100).toFixed(0);
       self.postMessage({
-        percentage: 100,
-        md5: spark.end()
-      });
-      self.close();
-    } else {
-      percentage += 100 / fileChunkList.length;
-      self.postMessage({
+        isOk: false,
         percentage
       });
-      loadNext(count);
+      loadNext();
+    } else {
+      let md5 = spark.end();
+      self.postMessage({
+        isOk: true,
+        percentage: 100,
+        md5
+      });
+      console.log(
+        `MD5计算完毕：${file.name} \nMD5：${md5} \n分片：${chunks} 大小:${fileSize
+        } 用时：${new Date().getTime() - startTime} ms`
+      );
     }
   }
-  reader.onerror = function() {
-		self.postMessage({
-			isError: true
-		});
-	};
-  const loadNext = index => {
-    count++;
-    reader.readAsArrayBuffer(fileChunkList[index].file);
+  reader.onerror = function () {
+    self.postMessage({
+      isError: true
+    });
   };
-  loadNext(0);
+  function loadNext() {
+    let start = currentChunk * size;
+    let end =
+      start + size >= fileSize ? fileSize : start +
+        size;
+    reader.readAsArrayBuffer(blobSlice.call(file, start, end));
+  }
 };
