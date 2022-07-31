@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import axios from 'axios'
 const SIZE = 10 * 1024 * 1024;	// 10M
 
@@ -8,6 +8,8 @@ const resetData = {
 	md5percentage: 0,
 	isMD5Loading: false,
 	percentage: 0,
+	isUploading: false,
+	isMerging: false,
 }
 
 const worker = ref<Worker>()
@@ -35,7 +37,7 @@ function queueUpload(file: any) {
 }
 // MD5 hash of the file
 function computeMD5(fileInfo: any): Promise<any> {
-	isMD5Loading.value = true;
+	fileInfo.isMD5Loading = true;
 	return new Promise((resolve, reject) => {
 		const wk = new Worker('/md5.js');
 		worker.value = wk;
@@ -49,35 +51,24 @@ function computeMD5(fileInfo: any): Promise<any> {
 			if (e.data.isError) {
 				alert('文件读取错误!!')
 				resolve(false);
-				md5percentage.value = 0;
-				isMD5Loading.value = false;
+				fileInfo.md5percentage = 0;
+				fileInfo.isMD5Loading = false;
 			}
 
 			// 计算进度
 			if (e.data.percentage > 0) {
 				console.log('md5进度:' + e.data.percentage);
-				md5percentage.value = e.data.percentage;
+				fileInfo.md5percentage = e.data.percentage;
 			}
 
 			// 计算完成
 			if (e.data.isOk && e.data.percentage === 100) {
-				md5percentage.value = 0;
-				isMD5Loading.value = false;
+				fileInfo.md5percentage = 0;
+				fileInfo.isMD5Loading = false;
 				resolve(e.data.md5);
 			}
 		};
 	})
-}
-// 对文件进行切片
-function createFileChunk(file: any, size = SIZE) {
-	const fileChunkList = [];
-	let cur = 0;
-	let blobSlice = File.prototype.slice
-	while (cur < file.size) {
-		fileChunkList.push({ file: blobSlice.call(file.raw, cur, cur + size) });
-		cur += size;
-	}
-	return fileChunkList;
 }
 
 async function preVerifyUpload(params: { filename: string, md5: string, totalChunks: number, size: number }) {
@@ -91,7 +82,9 @@ const uploadFile = async (index: number) => {
 	// const fileChunkList = createFileChunk(fileInfo.file);
 	const totalChunks = Math.ceil(fileInfo.file.raw.size / SIZE)
 
-	fileInfo.md5 = await computeMD5(fileInfo)
+	if (!fileInfo.md5) {
+		fileInfo.md5 = await computeMD5(fileInfo)
+	}
 
 	// MD5计算完成 发送预检请求，判断是否上传过
 	const { shouldUpload, uploadedList, isOk } = await preVerifyUpload({
@@ -109,8 +102,30 @@ const uploadFile = async (index: number) => {
 	const noUploadedList = [...Array(totalChunks).keys()]
 		.filter((_, index) => !uploadedList.includes(index))
 
-	
+	fileInfo.chunkList = [
+		...noUploadedList.map((item: number) => ({
+			percentage: 0,
+			index: item,
+			size: SIZE
+		})), 
+		...uploadedList.map((item: number) => ({
+			percentage: 1,
+			index: item,
+			size: SIZE
+		}))
+	]
+
+	fileInfo.isUploading = true
 	await uploadChunks(noUploadedList, fileInfo, totalChunks)
+	fileInfo.isUploading = false
+
+	fileInfo.isMerging = true
+	await uploadMerge({
+		md5: fileInfo.md5,
+		filename: fileInfo.filename,
+		size: SIZE
+	});
+	fileInfo.isMerging = false
 }
 
 async function uploadChunks(noUploadedList: number[], fileInfo: any, totalChunks: number) {
@@ -122,9 +137,9 @@ async function uploadChunks(noUploadedList: number[], fileInfo: any, totalChunks
 }
 
 async function uploadChunk(fileInfo: any, chunkIndex: number, totalChunks: number) {
-	
+
 	const formData = new FormData();
-	
+
 	const fileSize = fileInfo.file.raw.size
 	let start = chunkIndex * SIZE;
 	let end = start + SIZE >= fileSize ? fileSize : start + SIZE;
@@ -139,11 +154,27 @@ async function uploadChunk(fileInfo: any, chunkIndex: number, totalChunks: numbe
 	return axios.post('/api/upload', formData, {
 		headers: {
 			'Content-Type': 'multipart/form-data'
+		},
+		onUploadProgress: (e) => {
+			fileInfo.chunkList[chunkIndex].percentage = parseInt(String(e.loaded / e.total));
 		}
 	})
 }
 
-async function uploadMerge(pamas: any) {
+const progress = computed(() => {
+	return uploadList.value.map((fileInfo: any) => {
+		const { chunkList, file } = fileInfo;
+
+		if (!chunkList) return 0
+		const loaded = chunkList.map((item: any) => item.size * item.percentage)
+			.reduce((acc: number, cur: number) => acc + cur);
+
+		if (loaded >= file.raw.size) return 100
+		return ((loaded / file.raw.size) * 100).toFixed(2)
+	})
+})
+
+async function uploadMerge(pamas: { md5: string, filename: string, size: number }) {
 	const { data } = await axios.post('/api/uploadMerge', pamas)
 	alert(data.msg)
 }
@@ -151,10 +182,9 @@ async function uploadMerge(pamas: any) {
 async function asyncPool(limit: number, array: any[], iteratorFn: any) {
 	const ret = [];
 	const executing: any[] = [];
-	console.log(limit, array, iteratorFn);
-	
 	for (const item of array) {
-		const p = iteratorFn(item);
+		let p = iteratorFn(item);
+		p = p instanceof Promise ? p : Promise.resolve(p);
 		ret.push(p);
 		if (limit <= array.length) {
 			const e = p.then(() => {
@@ -186,8 +216,12 @@ watch(uploadList.value, (files: any[]) => {
 			</template>
 		</el-upload>
 		<div class="file-list">
-			<div v-for="({ file }, index) in uploadList" class="upload-file">
+			<div v-for="({ file, isMD5Loading, md5percentage, isUploading, isMerging }, index) in uploadList"
+				class="upload-file">
 				<span>{{ file.name }}</span>
+				<span v-if="isMD5Loading">md5进度:{{ md5percentage }}%</span>
+				<span v-else-if="isUploading">上传进度:{{ progress[index] }}%</span>
+				<span v-else-if="isMerging">合并中...</span>
 				<div>
 					<el-button type="primary" @click="uploadFile(index)">upload</el-button>
 					<el-button type="warning">pause</el-button>

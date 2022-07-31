@@ -24,7 +24,7 @@ self.onmessage = e => {
     spark.append(e.target.result);
     if (currentChunk < chunks) {
       currentChunk++;
-      let percentage = ((currentChunk / chunks) * 100).toFixed(0);
+      let percentage = ((currentChunk / chunks) * 100).toFixed(2);
       self.postMessage({
         isOk: false,
         percentage
@@ -34,7 +34,7 @@ self.onmessage = e => {
       let md5 = spark.end();
       self.postMessage({
         isOk: true,
-        percentage: 100,
+        percentage: 100.00,
         md5
       });
       console.log(

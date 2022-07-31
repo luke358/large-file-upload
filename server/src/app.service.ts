@@ -69,6 +69,9 @@ export class AppService {
     await fse.move(file.path, path.resolve(chunkDir, chunkIndex), {
       overwrite: true,
     });
+    return {
+      isOk: true,
+    };
   }
 
   async uploadMerge(body) {
