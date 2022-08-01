@@ -10,6 +10,7 @@ const resetData = {
 	percentage: 0,
 	isUploading: false,
 	isMerging: false,
+	isPaused: false,
 }
 
 const worker = ref<Worker>()
@@ -93,7 +94,7 @@ const uploadFile = async (index: number) => {
 		totalChunks: Math.ceil(fileInfo.file.raw.size / SIZE),
 		size: SIZE,
 	});
-
+	// shouldUpload 文件已经存在， isOk文件上传完毕，但是没有进行合并
 	if (!shouldUpload || isOk) {
 		alert("upload success!")
 		return;
@@ -116,6 +117,7 @@ const uploadFile = async (index: number) => {
 	]
 
 	fileInfo.isUploading = true
+	fileInfo.isPaused = false
 	await uploadChunks(noUploadedList, fileInfo, totalChunks)
 	fileInfo.isUploading = false
 
@@ -128,10 +130,19 @@ const uploadFile = async (index: number) => {
 	fileInfo.isMerging = false
 }
 
+function onPaused (index: number) {
+	uploadList.value[index].isPaused = true;
+	uploadList.value[index].isUploading = false;
+}
+
 async function uploadChunks(noUploadedList: number[], fileInfo: any, totalChunks: number) {
 
 	// TODO 失败重试
 	return asyncPool(5, noUploadedList, (index: number) => {
+		
+		// 暂停
+		if (fileInfo.isPaused) return Promise.reject();
+		
 		return uploadChunk(fileInfo, index, totalChunks)
 	})
 }
@@ -162,7 +173,8 @@ async function uploadChunk(fileInfo: any, chunkIndex: number, totalChunks: numbe
 }
 
 const progress = computed(() => {
-	return uploadList.value.map((fileInfo: any) => {
+	const progre1: number = progress.value ? +progress.value[0] : 0
+	const progre2 = uploadList.value.map((fileInfo: any) => {
 		const { chunkList, file } = fileInfo;
 
 		if (!chunkList) return 0
@@ -172,6 +184,7 @@ const progress = computed(() => {
 		if (loaded >= file.raw.size) return 100
 		return ((loaded / file.raw.size) * 100).toFixed(2)
 	})
+	return progre1 > progre2 ? progre1 : progre2
 })
 
 async function uploadMerge(pamas: { md5: string, filename: string, size: number }) {
@@ -200,11 +213,6 @@ async function asyncPool(limit: number, array: any[], iteratorFn: any) {
 	return Promise.all(ret);
 }
 
-watch(uploadList.value, (files: any[]) => {
-	// 上传文件
-	// if (onQueue.value === true || files.length === 0) return;
-	// queueUpload([...files][0]);
-})
 </script>
 
 <template>
@@ -216,15 +224,16 @@ watch(uploadList.value, (files: any[]) => {
 			</template>
 		</el-upload>
 		<div class="file-list">
-			<div v-for="({ file, isMD5Loading, md5percentage, isUploading, isMerging }, index) in uploadList"
+			<div v-for="({ file, isMD5Loading, md5percentage, isUploading, isMerging, isPaused }, index) in uploadList"
 				class="upload-file">
 				<span>{{ file.name }}</span>
 				<span v-if="isMD5Loading">md5进度:{{ md5percentage }}%</span>
-				<span v-else-if="isUploading">上传进度:{{ progress[index] }}%</span>
+				<span v-else-if="isUploading || isPaused">上传进度:{{ progress[index] }}%</span>
 				<span v-else-if="isMerging">合并中...</span>
 				<div>
-					<el-button type="primary" @click="uploadFile(index)">upload</el-button>
-					<el-button type="warning">pause</el-button>
+					<el-button v-if="!isPaused && !isUploading" type="primary" @click="uploadFile(index)">上传</el-button>
+					<el-button v-else-if="isUploading" type="warning" @click="onPaused(index)">暂停</el-button>
+					<el-button v-else type="warning" @click="uploadFile(index)">继续</el-button>
 					<el-button type="danger">delete</el-button>
 				</div>
 			</div>
